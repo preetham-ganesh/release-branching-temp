@@ -1,0 +1,64 @@
+name: "[Reuse] Finalize Release"
+
+on:
+  workflow_call:
+
+jobs:
+  release_branch:
+    name: Finalize Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail If Not On release/*
+        if: ${{ !startsWith(github.ref, 'refs/heads/release') }}
+        run: |
+          echo "This workflow should not be triggered on a branch other than release/*"
+          exit 1
+      - uses: actions/checkout@v3
+      - name: Git Config
+        uses: radaisystems/common-actions/git-config@v1
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install Poetry
+        run: |
+          pipx install poetry
+      - uses: actions/checkout@v3
+        with: 
+          ref: main
+      - name: Set Envars - Main
+        run: |
+          echo "MAIN_RELEASE_VERSION=$(poetry version -s | egrep -o '^[^r]+')" >> $GITHUB_ENV
+      - uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+      - name: Set Envars - Release
+        run: |
+          echo "RELEASE_BRANCH_NAME=release/v$(poetry version -s | egrep -o '^[^r]+')" >> $GITHUB_ENV
+          echo "FINAL_RELEASE_BRANCH_NAME=final/release/v$(poetry version -s | egrep -o '^[^r]+')" >> $GITHUB_ENV
+          echo "RELEASE_VERSION=$(poetry version -s | egrep -o '^[^r]+')" >> $GITHUB_ENV
+      - name: Fail If final/branch Already Exists
+        run: |
+          git fetch
+          git branch -rl | grep -vz $FINAL_RELEASE_BRANCH_NAME
+      - name: Fail If Version Is Behind Main
+        run: | 
+          pip install semver
+          python -c "
+          import semver
+          if semver.compare('$RELEASE_VERSION', '$MAIN_RELEASE_VERSION') <= 0:
+              raise ValueError
+          "
+      - name: Create final/release Branch
+        run: |
+          git checkout -b $FINAL_RELEASE_BRANCH_NAME
+          poetry version $RELEASE_VERSION
+          git commit -am "ci(pyproject.toml): $RELEASE_VERSION FINAL" 
+          git push -u origin $FINAL_RELEASE_BRANCH_NAME
+      - name: Open PR to Prod
+        run: |
+          gh pr create -B main -H $FINAL_RELEASE_BRANCH_NAME --title "Promote $RELEASE_BRANCH_NAME" --body 'Created by Github action'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      - name: Remove release Branch
+        run: |
+          git push origin --delete $RELEASE_BRANCH_NAME
