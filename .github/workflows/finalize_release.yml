@@ -1,64 +1,109 @@
 name: "[Reuse] Finalize Release"
 
 on:
-  workflow_call:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: "Release branch to finalize (example: release/v1.2.3)"
+        required: true
+        type: string
+      base_branch:
+        description: "Base branch to PR into (usually main)"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   release_branch:
     name: Finalize Release
     runs-on: ubuntu-latest
+
     steps:
-      - name: Fail If Not On release/*
-        if: ${{ !startsWith(github.ref, 'refs/heads/release') }}
+      - name: Validate Input Branch
         run: |
-          echo "This workflow should not be triggered on a branch other than release/*"
-          exit 1
-      - uses: actions/checkout@v3
-      - name: Git Config
-        uses: radaisystems/common-actions/git-config@v1
-      - uses: actions/setup-python@v4
+          echo "Release branch: ${{ inputs.release_branch }}"
+          if [[ "${{ inputs.release_branch }}" != release/* ]]; then
+            echo "This workflow should only be triggered for release/* branches."
+            exit 1
+          fi
+
+      - name: Checkout Release Branch
+        uses: actions/checkout@v3
         with:
-          python-version: '3.10'
+          ref: ${{ inputs.release_branch }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
       - name: Install Poetry
         run: |
           pipx install poetry
-      - uses: actions/checkout@v3
-        with: 
-          ref: main
-      - name: Set Envars - Main
+
+      - name: Capture Release Version
         run: |
-          echo "MAIN_RELEASE_VERSION=$(poetry version -s | egrep -o '^[^r]+')" >> $GITHUB_ENV
-      - uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.GH_TOKEN }}
-      - name: Set Envars - Release
-        run: |
-          echo "RELEASE_BRANCH_NAME=release/v$(poetry version -s | egrep -o '^[^r]+')" >> $GITHUB_ENV
-          echo "FINAL_RELEASE_BRANCH_NAME=final/release/v$(poetry version -s | egrep -o '^[^r]+')" >> $GITHUB_ENV
           echo "RELEASE_VERSION=$(poetry version -s | egrep -o '^[^r]+')" >> $GITHUB_ENV
-      - name: Fail If final/branch Already Exists
+          echo "RELEASE_BRANCH_NAME=${{ inputs.release_branch }}" >> $GITHUB_ENV
+          echo "FINAL_RELEASE_BRANCH_NAME=final/${{ inputs.release_branch }}" >> $GITHUB_ENV
+          echo "BASE_BRANCH=${{ inputs.base_branch }}" >> $GITHUB_ENV
+
+      - name: Checkout Base Branch & Capture Base Version
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+
+      - name: Capture Base Version
         run: |
-          git fetch
-          git branch -rl | grep -vz $FINAL_RELEASE_BRANCH_NAME
-      - name: Fail If Version Is Behind Main
-        run: | 
+          echo "BASE_RELEASE_VERSION=$(poetry version -s | egrep -o '^[^r]+')" >> $GITHUB_ENV
+
+      - name: Fail If final/* Branch Already Exists
+        run: |
+          git fetch --all --prune
+          if git ls-remote --exit-code --heads origin "$FINAL_RELEASE_BRANCH_NAME" >/dev/null; then
+            echo "Branch already exists: $FINAL_RELEASE_BRANCH_NAME"
+            exit 1
+          fi
+
+      - name: Fail If Version Is Not Ahead Of Base
+        run: |
           pip install semver
           python -c "
           import semver
-          if semver.compare('$RELEASE_VERSION', '$MAIN_RELEASE_VERSION') <= 0:
-              raise ValueError
+          if semver.compare('${{ env.RELEASE_VERSION }}', '${{ env.BASE_RELEASE_VERSION }}') <= 0:
+              raise ValueError('Release version must be > base version')
           "
-      - name: Create final/release Branch
+
+      - name: Checkout Release Branch Again
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.release_branch }}
+          fetch-depth: 0
+
+      - name: Create final/* Branch (commit FINAL marker)
         run: |
-          git checkout -b $FINAL_RELEASE_BRANCH_NAME
-          poetry version $RELEASE_VERSION
-          git commit -am "ci(pyproject.toml): $RELEASE_VERSION FINAL" 
-          git push -u origin $FINAL_RELEASE_BRANCH_NAME
-      - name: Open PR to Prod
+          git checkout -b "$FINAL_RELEASE_BRANCH_NAME"
+          poetry version "$RELEASE_VERSION"
+          git status
+          git commit -am "ci(pyproject.toml): $RELEASE_VERSION FINAL" || echo "No changes to commit"
+          git push -u origin "$FINAL_RELEASE_BRANCH_NAME"
+
+      - name: Open PR to Base Branch
         run: |
-          gh pr create -B main -H $FINAL_RELEASE_BRANCH_NAME --title "Promote $RELEASE_BRANCH_NAME" --body 'Created by Github action'
+          gh pr create \
+            -B "$BASE_BRANCH" \
+            -H "$FINAL_RELEASE_BRANCH_NAME" \
+            --title "Promote $RELEASE_BRANCH_NAME" \
+            --body "Created by GitHub Action"
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      - name: Remove release Branch
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove release/* Branch
         run: |
-          git push origin --delete $RELEASE_BRANCH_NAME
+          git push origin --delete "$RELEASE_BRANCH_NAME"
