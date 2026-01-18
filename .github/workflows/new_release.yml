@@ -5,71 +5,87 @@ on:
     inputs:
       bump:
         type: string
-        description: Release version to create
         required: true
         default: patch
       create_tag:
         type: boolean
-        description: Whether to create a tag for the release branch
-        required: false
         default: true
       as_rc:
         type: boolean
-        description: Wether to append the "rc0" suffix to the version (e.g. 1.0.0rc0 vs 1.0.0)
-        required: false
         default: true
+
+  workflow_dispatch:
+    inputs:
+      bump:
+        type: choice
+        required: true
+        default: patch
+        options: [patch, minor, major]
+      create_tag:
+        type: boolean
+        default: true
+      as_rc:
+        type: boolean
+        default: true
+
 jobs:
   release_branch:
     name: New Release
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
     steps:
-      - name: Fail If Invalid Bump String
-        run: | 
-          python -c "
-          if '${{ inputs.bump }}' not in ['patch', 'minor', 'major']:
-              raise ValueError
-          "
       - name: Fail If Not On main
         if: github.ref != 'refs/heads/main'
         run: |
-          echo "This workflow should not be triggered on a branch other than main"
+          echo "Must be run on main"
           exit 1
-      - uses: actions/checkout@v3
-        with: 
-          ref: main
-          token: ${{ secrets.GH_TOKEN }}
-      - name: Git Config
-        uses: radaisystems/common-actions/git-config@v1
-      - uses: actions/setup-python@v4
+
+      - uses: actions/checkout@v4
         with:
-          python-version: '3.10'
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
       - name: Install Poetry
         run: |
           pipx install poetry
-      - name: Set Release Envar
+
+      - name: Compute release version
         run: |
-          echo "RELEASE_BRANCH_NAME=release/v$(poetry version -s --dry-run ${{ inputs.bump }})" >> $GITHUB_ENV
+          BASE_VERSION=$(poetry version -s --dry-run ${{ inputs.bump }})
+          echo "RELEASE_BRANCH_NAME=release/v$BASE_VERSION" >> $GITHUB_ENV
           if ${{ inputs.as_rc }}; then
-            echo "RELEASE_VERSION=$(poetry version -s --dry-run ${{ inputs.bump }})rc0" >> $GITHUB_ENV
-            echo "RELEASE_TAG_VERSION=v$(poetry version -s --dry-run ${{ inputs.bump }})rc0" >> $GITHUB_ENV
+            echo "RELEASE_VERSION=${BASE_VERSION}rc0" >> $GITHUB_ENV
+            echo "RELEASE_TAG_VERSION=v${BASE_VERSION}rc0" >> $GITHUB_ENV
           else
-            echo "RELEASE_VERSION=$(poetry version -s --dry-run ${{ inputs.bump }})" >> $GITHUB_ENV
-            echo "RELEASE_TAG_VERSION=v$(poetry version -s --dry-run ${{ inputs.bump }})" >> $GITHUB_ENV
+            echo "RELEASE_VERSION=$BASE_VERSION" >> $GITHUB_ENV
+            echo "RELEASE_TAG_VERSION=v$BASE_VERSION" >> $GITHUB_ENV
           fi
-      - name: Check Branch Already Exists
+
+      - name: Fail If Branch Exists
         run: |
-          git fetch
-          git branch -rl | grep -vz $RELEASE_BRANCH_NAME
-      - name: Create Release Branch
+          git fetch origin
+          git show-ref --verify --quiet refs/remotes/origin/$RELEASE_BRANCH_NAME && exit 1 || true
+
+      - name: Create release branch
         run: |
           git checkout -b $RELEASE_BRANCH_NAME
-      - name: Commit
-        run: | 
           poetry version $RELEASE_VERSION
-          git commit -am "ci(pyproject.toml): bump ${{ inputs.bump }} version" 
+          git commit -am "ci(pyproject.toml): bump ${{ inputs.bump }}"
           git push -u origin $RELEASE_BRANCH_NAME
-      - name: Create Tag
-        if: inputs.create_tag == 'true'
+
+      - name: Create tag
+        if: inputs.create_tag
         run: |
-          git tag -a $RELEASE_TAG_VERSION -m ""
-          git push --tags
+          git tag -a $RELEASE_TAG_VERSION -m "Release $RELEASE_TAG_VERSION"
+          git push origin $RELEASE_TAG_VERSION
